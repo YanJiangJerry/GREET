@@ -8,11 +8,27 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import dgl.function as fn
-
+from torch_geometric.utils import *
 from utils import *
 
 EOS = 1e-10
 norm = EdgeWeightNorm(norm='both')
+
+def homophily_w(edges, labels):
+    """
+    计算同质性边的掩码。
+    """
+    start_nodes = edges[0]
+    end_nodes = edges[1]
+    return labels[start_nodes] == labels[end_nodes]
+
+def heterophily_w(edges, labels):
+    """
+    计算异质性边的掩码。
+    """
+    start_nodes = edges[0]
+    end_nodes = edges[1]
+    return labels[start_nodes] != labels[end_nodes]
 
 
 class GCL(nn.Module):
@@ -152,10 +168,47 @@ class Edge_Discriminator(nn.Module):
         return torch.sigmoid(gate_inputs).squeeze()
 
 
-    def weight_forward(self, features, edges):
+    def weight_forward(self, features, edges, labels=None):
         embeddings = self.get_node_embedding(features)
         edges_weights_raw = self.get_edge_weight(embeddings, edges)
         weights_lp = self.gumbel_sampling(edges_weights_raw)
+        
+        # if labels is not None:
+        #     labels = labels.cpu()
+        #     edges = edges.cpu()
+
+        #     homophily_mask = homophily(edges, labels)
+        #     heterophily_mask = heterophily(edges, labels)
+            
+        #     homo_weights = weights_lp[homophily_mask]
+        #     hetero_weights = weights_lp[heterophily_mask]
+            
+        #     homo_avg_weight = homo_weights.mean()
+        #     hetero_avg_weight = hetero_weights.mean()
+            
+        #     print(f"Homophily edges average weight: {homo_avg_weight.item(), homo_weights.min().item(), homo_weights.max().item()}")
+        #     print(f"Heterophily edges average weight: {hetero_avg_weight.item(), hetero_weights.min().item(), hetero_weights.max().item()}")
+        
+        if labels is not None:
+            labels = labels.cpu()
+            edges = edges.cpu()
+
+            # Sort weights_lp and get the indices of sorted weights
+            sorted_indices = torch.argsort(weights_lp)
+            
+            # Find the mid index to split the edges into two halves
+            mid_index = len(weights_lp) // 2
+            
+            # Get the smallest and largest halves
+            smallest_half_indices = sorted_indices[:mid_index].cpu()
+            largest_half_indices = sorted_indices[-mid_index:].cpu()
+
+            print(homophily(edges, labels))
+            # Compute homophily and heterophily for smallest half edges
+            print("heter edges homophily:", homophily(edges[:,smallest_half_indices].cpu(), labels.cpu()), edges[:,smallest_half_indices].shape[1])
+            # Compute homophily and heterophily for largest half edges
+            print("homo edges homophily:", homophily(edges[:,largest_half_indices].cpu(), labels.cpu()), edges[:,largest_half_indices].shape[1])
+
         weights_hp = 1 - weights_lp
         return weights_lp, weights_hp
 
@@ -191,8 +244,8 @@ class Edge_Discriminator(nn.Module):
         return adj_lp, adj_hp
 
 
-    def forward(self, features, edges):
-        weights_lp, weights_hp = self.weight_forward(features, edges)
+    def forward(self, features, edges, labels=None):
+        weights_lp, weights_hp = self.weight_forward(features, edges, labels)
         adj_lp, adj_hp = self.weight_to_adj(edges, weights_lp, weights_hp)
         return adj_lp, adj_hp, weights_lp, weights_hp
 

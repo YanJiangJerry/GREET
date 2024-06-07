@@ -38,34 +38,69 @@ def train_cl(cl_model, discriminator, optimizer_cl, features, str_encodings, edg
     return cl_loss.item()
 
 
-def train_discriminator(cl_model, discriminator, optimizer_disc, features, str_encodings, edges, args):
+# def train_discriminator(cl_model, discriminator, optimizer_disc, features, str_encodings, edges, args, labels, train_mask, test_mask):
+
+#     cl_model.eval()
+#     discriminator.train()
+
+#     adj_1, adj_2, weights_lp, weights_hp = discriminator(torch.cat((features, str_encodings), 1), edges, labels)
+#     print()
+
+#     rand_np = generate_random_node_pairs(features.shape[0], edges.shape[1])
+#     psu_label = torch.ones(edges.shape[1]).cuda()
+
+#     embedding = cl_model.get_embedding(features, adj_1, adj_2)
+#     edge_emb_sim = F.cosine_similarity(embedding[edges[0]], embedding[edges[1]])
+
+#     rnp_emb_sim_lp = F.cosine_similarity(embedding[rand_np[0]], embedding[rand_np[1]])
+#     loss_lp = F.margin_ranking_loss(edge_emb_sim, rnp_emb_sim_lp, psu_label, margin=args.margin_hom, reduction='none')
+#     loss_lp *= torch.relu(weights_lp - 0.5)
+
+#     rnp_emb_sim_hp = F.cosine_similarity(embedding[rand_np[0]], embedding[rand_np[1]])
+#     loss_hp = F.margin_ranking_loss(rnp_emb_sim_hp, edge_emb_sim, psu_label, margin=args.margin_het, reduction='none')
+#     loss_hp *= torch.relu(weights_hp - 0.5)
+
+#     rank_loss = (loss_lp.mean() + loss_hp.mean()) / 2
+
+#     optimizer_disc.zero_grad()
+#     rank_loss.backward()
+#     optimizer_disc.step()
+
+#     return rank_loss.item()
+
+def train_discriminator(cl_model, discriminator, optimizer_disc, features, str_encodings, edges, args, labels, train_mask, test_mask):
+    labels = labels.cuda()
+    train_mask = train_mask[:, 0].cuda()
 
     cl_model.eval()
     discriminator.train()
 
-    adj_1, adj_2, weights_lp, weights_hp = discriminator(torch.cat((features, str_encodings), 1), edges)
-    rand_np = generate_random_node_pairs(features.shape[0], edges.shape[1])
-    psu_label = torch.ones(edges.shape[1]).cuda()
+    # 过滤仅包含训练节点的边
+    train_edges_mask = (train_mask[edges[0]] & train_mask[edges[1]]).squeeze()
+    print(train_edges_mask.shape, train_mask.shape)
+    train_edges = edges[:, train_edges_mask]
 
-    embedding = cl_model.get_embedding(features, adj_1, adj_2)
-    edge_emb_sim = F.cosine_similarity(embedding[edges[0]], embedding[edges[1]])
+    # 获取调整后的邻接矩阵和权重
+    adj_1, adj_2, weights_lp, weights_hp = discriminator(torch.cat((features, str_encodings), 1), train_edges, labels)
 
-    rnp_emb_sim_lp = F.cosine_similarity(embedding[rand_np[0]], embedding[rand_np[1]])
-    loss_lp = F.margin_ranking_loss(edge_emb_sim, rnp_emb_sim_lp, psu_label, margin=args.margin_hom, reduction='none')
-    loss_lp *= torch.relu(weights_lp - 0.5)
+    # 计算每条边的homo和heter分数
+    homo_scores = weights_lp
+    heter_scores = weights_hp
 
-    rnp_emb_sim_hp = F.cosine_similarity(embedding[rand_np[0]], embedding[rand_np[1]])
-    loss_hp = F.margin_ranking_loss(rnp_emb_sim_hp, edge_emb_sim, psu_label, margin=args.margin_het, reduction='none')
-    loss_hp *= torch.relu(weights_hp - 0.5)
+    # 计算每条边的类别
+    edge_labels = (labels[train_edges[0]] == labels[train_edges[1]]).float()  # 1表示homo边，0表示heter边
 
-    rank_loss = (loss_lp.mean() + loss_hp.mean()) / 2
+    # 计算homo和heter的logits
+    logits = torch.stack([heter_scores, homo_scores], dim=1)  # [M, 2]
+
+    # 计算交叉熵损失
+    loss = F.cross_entropy(logits, edge_labels.long())
 
     optimizer_disc.zero_grad()
-    rank_loss.backward()
+    loss.backward()
     optimizer_disc.step()
 
-    return rank_loss.item()
-
+    return loss.item()
 
 def main(args):
 
@@ -96,7 +131,7 @@ def main(args):
 
             for _ in range(args.cl_rounds):
                 cl_loss = train_cl(cl_model, discriminator, optimizer_cl, features, str_encodings, edges)
-            rank_loss = train_discriminator(cl_model, discriminator, optimizer_discriminator, features, str_encodings, edges, args)
+            rank_loss = train_discriminator(cl_model, discriminator, optimizer_discriminator, features, str_encodings, edges, args, labels, train_mask, test_mask)
 
             print("[TRAIN] Epoch:{:04d} | CL Loss {:.4f} | RANK loss:{:.4f} ".format(epoch, cl_loss, rank_loss))
 
